@@ -1,0 +1,7 @@
+{
+  "name": "PSTEC 전력량계",
+  "country": "KR",
+  "domains": ["sensor"],
+  "render_readme": true,
+  "icons": ["images/logo.png"]
+}
