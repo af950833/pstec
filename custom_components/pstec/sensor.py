@@ -48,17 +48,17 @@ class PstecTcpSensor:
     def get_sensors(self):
         """센서 엔터티 리스트 생성"""
         sensor_types = [
-            ("rec_dev_record", "kWh", "total_increasing"),
-            ("ret_dev_record", "kWh", "total_increasing"),
-            ("dev_voltage", "V", None),
-            ("dev_current", "A", None),
-            ("act_dev_power", "W", None),
-            ("dev_frequency", "Hz", None),
-            ("dev_factor", "PF", None),
-            ("dev_direction", None, None),
+            ("rec_dev_record", "kWh", "total_increasing", "energy"),
+            ("ret_dev_record", "kWh", "total_increasing", "energy"),
+            ("dev_voltage", "V", None, "voltage"),
+            ("dev_current", "A", None, "current"),
+            ("act_dev_power", "W", None, "power"),
+            ("dev_frequency", "Hz", None, "frequency"),
+            ("dev_factor", "PF", None, "power_factor"),
+            ("dev_direction", None, None, None),
         ]
         self._sensors = [
-            PstecSensorEntity(self._name, sensor_type[0], sensor_type[1], sensor_type[2], self._entry_id)
+            PstecSensorEntity(self._name, sensor_type[0], sensor_type[1], sensor_type[2], sensor_type[3], self._entry_id)
             for sensor_type in sensor_types
         ]
         return self._sensors
@@ -134,10 +134,11 @@ class PstecTcpSensor:
 class PstecSensorEntity(SensorEntity):
     """개별 센서 엔터티 정의"""
 
-    def __init__(self, prefix, sensor_type, unit, state_class, entry_id):
+    def __init__(self, prefix, sensor_type, unit, state_class, device_class, entry_id):
         self._name = f"{prefix}_{sensor_type}"
         self._unit = unit
         self._state_class = state_class
+        self._device_class = device_class
         self._state = None
         self._entry_id = entry_id
         self.sensor_type = sensor_type
@@ -165,3 +166,7 @@ class PstecSensorEntity(SensorEntity):
     def set_state(self, value):
         self._state = value
         self.async_write_ha_state()
+        
+    @property
+    def device_class(self):
+        return self._device_class
