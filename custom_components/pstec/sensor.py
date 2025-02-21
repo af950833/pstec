@@ -125,7 +125,7 @@ class PstecTcpSensor:
             f"{self._name}_ret_dev_record": float(int(data[12:20], 10)) / 10,
             f"{self._name}_dev_voltage": float(int(data[36:40], 10)) / 10,
             f"{self._name}_dev_current": float(int(data[40:44], 10)) / 10,
-            f"{self._name}_act_dev_power": int(data[44:50], 10) * (-1 if int(data[65:66], 10) & 0x2 else 1),
+            f"{self._name}_act_dev_power": int(data[44:50], 10) * (-1 if int(data[64:66], 16) & 0x04 else 1), #뒤에서 3번째 비트로 역방향 확인
             f"{self._name}_dev_frequency": float(int(data[56:60], 10)) / 100,
             f"{self._name}_dev_factor": float(int(data[60:64], 10)) / 100,
             f"{self._name}_dev_direction": "negative" if "{:b}".format(int(data[65:66], 10)).zfill(4)[1] == "1" else "positive",
