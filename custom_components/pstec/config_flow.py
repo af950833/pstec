@@ -1,5 +1,6 @@
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.helpers import selector
 import asyncio
 import logging
 from . import DOMAIN
@@ -53,6 +54,14 @@ class PstecConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema({
             vol.Required("name"): str,
+            vol.Required("meter_reading_day", default=25): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1,
+                    max=31,
+                    step=1,
+                    mode="box"
+                )
+            ),
             vol.Required("host"): str,
             vol.Required("port", default=8899): int,
             vol.Optional("scan_interval", default=10): int,
