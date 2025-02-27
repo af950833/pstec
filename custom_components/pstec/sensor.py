@@ -9,13 +9,26 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval, async_track_time_change
-
-# watchdog 라이브러리 사용 (requirements에 추가 필요)
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class JSONFileEventHandler(FileSystemEventHandler):
+    def __init__(self, usage_sensors, hass):
+        self.usage_sensors = usage_sensors
+        self.hass = hass
+
+    def on_modified(self, event):
+        file_path = os.path.abspath(event.src_path)
+        _LOGGER.debug("on_modified triggered for file: %s", file_path)
+        for sensor in self.usage_sensors:
+            sensor_file = os.path.abspath(sensor._file)
+            if file_path == sensor_file:
+                _LOGGER.debug("파일 변경 감지 (watchdog): %s", sensor_file)
+                sensor.update_from_file()
+                self.hass.loop.call_soon_threadsafe(asyncio.create_task, sensor.async_update())
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     # 기본 PSTEC TCP 센서 엔터티 생성
@@ -39,13 +52,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     ]
     async_add_entities(usage_sensors)
 
+    # watchdog Observer 시작
+    file_dir = os.path.dirname(usage_sensors[0]._file)
+    event_handler = JSONFileEventHandler(usage_sensors, hass)
+    observer = Observer()
+    observer.schedule(event_handler, file_dir, recursive=False)
+    observer.start()
+
+    # Home Assistant 종료 시 observer를 중지하도록 등록
+    def stop_observer(event):
+        observer.stop()
+        observer.join()
+    hass.bus.async_listen_once("shutdown", stop_observer)
+
     # 센서 시작 시, 각 사용량 센서가 파일에서 기준값을 업데이트하도록 호출
     for usage_sensor in usage_sensors:
         usage_sensor.update_from_file()  # 파일을 읽어 기준값(baseline) 업데이트 (필요한 경우)
-        # 파일 기반 센서("lday", "lmon", "lmon_record")는 초기 업데이트 및 파일 변경시만 업데이트
-        if usage_sensor._usage_type not in ("lday", "lmon", "lmon_record"):
-            await usage_sensor.async_update()  # live 값과 비교하여 상태 산출
-
+        await usage_sensor.async_update() # live 값과 비교하여 상태 산출
+        
     # 기본 센서 초기 업데이트 (실패하더라도 진행)
     try:
         await sensor.async_update()
@@ -75,7 +99,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     
         # 파일 경로 설정
         device_name = sensor._name
-        tday_file = hass.config.path(".storage", f"{device_name}_tday_energy.json")
+        tday_file = hass.config.path("em", f"{device_name}_tday_energy.json")
         _LOGGER.debug("파일 경로: %s", tday_file)
     
         # 기존 파일 내용 읽기
@@ -132,7 +156,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         await asyncio.sleep(delay_time)
         now = datetime.datetime.now()
         device_name = sensor._name
-        tday_file = hass.config.path(".storage", f"{device_name}_tday_energy.json")
+        tday_file = hass.config.path("em", f"{device_name}_tday_energy.json")
         if os.path.exists(tday_file):
             _LOGGER.debug("초기 파일 저장 건너뜀: tday 파일이 이미 존재합니다.")
             return
@@ -141,29 +165,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             await file_saving_callback(now)
                 
     hass.async_create_task(delayed_file_save())
-
-    # 파일 변경 감지를 위한 watchdog 핸들러 정의
-    class UsageFileChangeHandler(FileSystemEventHandler):
-        def __init__(self, hass, usage_sensors):
-            super().__init__()
-            self.hass = hass
-            self.usage_sensors = usage_sensors
-
-        def on_modified(self, event):
-            # 변경된 파일이 사용량 센서에서 사용하는 파일이면 해당 센서 업데이트 실행
-            for sensor in self.usage_sensors:
-                if os.path.abspath(event.src_path) == os.path.abspath(sensor._file):
-                    _LOGGER.debug("파일 변경 감지: %s", event.src_path)
-                    self.hass.async_create_task(sensor.async_update())
-
-    storage_dir = hass.config.path(".storage")
-    event_handler = UsageFileChangeHandler(hass, usage_sensors)
-    observer = Observer()
-    observer.schedule(event_handler, storage_dir, recursive=False)
-    observer_thread = threading.Thread(target=observer.start)
-    observer_thread.daemon = True
-    observer_thread.start()
-    hass.data.setdefault("pstec_observer", {})[entry.entry_id] = observer
+#    hass.async_create_task(check_file_changes(hass, usage_sensors))
 
 
 class PstecTcpSensor:
@@ -216,14 +218,14 @@ class PstecTcpSensor:
         for attempt in range(max_retries):
             try:
                 reader, writer = await asyncio.open_connection(self._host, self._port)
-                _LOGGER.debug(f"연결 테스트: {self._host}:{self._port}")
+                #_LOGGER.debug(f"연결 테스트: {self._host}:{self._port}")
                 writer.write(self._payload)
-                _LOGGER.debug(f"송신 패킷 (HEX): {self._payload.hex()}")
+                #_LOGGER.debug(f"송신 패킷 (HEX): {self._payload.hex()}")
                 await writer.drain()
                 data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
                 writer.close()
                 await writer.wait_closed()
-                _LOGGER.debug(f"Raw Data (Hex): {data.hex()}")
+                #_LOGGER.debug(f"Raw Data (Hex): {data.hex()}")
                 break
             except (asyncio.TimeoutError, ConnectionResetError) as e:
                 if attempt == max_retries - 1:
@@ -331,8 +333,7 @@ class PstecUsageSensor(SensorEntity):
             self._name = f"{device_name}_{record_type}_{usage_type}_total"
         self._state = None
         self._baseline = None  # 파일에서 읽은 기준값 (rec, ret는 개별, act는 net 값)
-        self._file = hass.config.path(".storage", f"{device_name}_tday_energy.json")
-        self._last_mod_time = None
+        self._file = hass.config.path("em", f"{device_name}_tday_energy.json")
         self._meter_reading_day = entry.data.get("meter_reading_day")
 
     @property
@@ -356,32 +357,29 @@ class PstecUsageSensor(SensorEntity):
         if self._usage_type == "tmon":
             if os.path.exists(self._file):
                 try:
-                    mod_time = os.path.getmtime(self._file)
-                    if self._last_mod_time != mod_time:
-                        self._last_mod_time = mod_time
-                        with open(self._file, "r", encoding="utf-8") as f:
-                            records = json.load(f)
-                        if records and isinstance(records, list):
-                            filtered_records = []
-                            for rec in records:
-                                try:
-                                    d = datetime.datetime.strptime(rec.get("date"), "%Y-%m-%d")
-                                    if d.day == int(self._meter_reading_day):
-                                        filtered_records.append(rec)
-                                except Exception as e:
-                                    _LOGGER.error("날짜 파싱 오류: %s", e)
-                            if filtered_records:
-                                filtered_records.sort(key=lambda r: r.get("date", ""))
-                                latest_record = filtered_records[-1]
-                                if self._record_type == "rec":
-                                    self._baseline = float(latest_record.get("rec_dev_record", 0))
-                                elif self._record_type == "ret":
-                                    self._baseline = float(latest_record.get("ret_dev_record", 0))
-                                elif self._record_type == "act" or self._record_type == "fct":
-                                    baseline_rec = float(latest_record.get("rec_dev_record", 0))
-                                    baseline_ret = float(latest_record.get("ret_dev_record", 0))
-                                    self._baseline = baseline_rec - baseline_ret
-                                _LOGGER.debug("%s (월간) 센서 기준값 업데이트: %s", self._name, self._baseline)
+                    with open(self._file, "r", encoding="utf-8") as f:
+                        records = json.load(f)
+                    if records and isinstance(records, list):
+                        filtered_records = []
+                        for rec in records:
+                            try:
+                                d = datetime.datetime.strptime(rec.get("date"), "%Y-%m-%d")
+                                if d.day == int(self._meter_reading_day):
+                                    filtered_records.append(rec)
+                            except Exception as e:
+                                _LOGGER.error("날짜 파싱 오류: %s", e)
+                        if filtered_records:
+                            filtered_records.sort(key=lambda r: r.get("date", ""))
+                            latest_record = filtered_records[-1]
+                            if self._record_type == "rec":
+                                self._baseline = float(latest_record.get("rec_dev_record", 0))
+                            elif self._record_type == "ret":
+                                self._baseline = float(latest_record.get("ret_dev_record", 0))
+                            elif self._record_type == "act" or self._record_type == "fct":
+                                baseline_rec = float(latest_record.get("rec_dev_record", 0))
+                                baseline_ret = float(latest_record.get("ret_dev_record", 0))
+                                self._baseline = baseline_rec - baseline_ret
+                            _LOGGER.debug("%s (월간) 센서 기준값 업데이트: %s", self._name, self._baseline)
                 except Exception as e:
                     _LOGGER.error("파일 읽기 오류 (%s): %s", self._file, e)
         elif self._usage_type == "lmon_record":
@@ -425,23 +423,20 @@ class PstecUsageSensor(SensorEntity):
             # tday 센서: 파일에서 최신 기록을 기준으로 업데이트
             if os.path.exists(self._file):
                 try:
-                    mod_time = os.path.getmtime(self._file)
-                    if self._last_mod_time != mod_time:
-                        self._last_mod_time = mod_time
-                        with open(self._file, "r", encoding="utf-8") as f:
-                            records = json.load(f)
-                        if records and isinstance(records, list):
-                            records.sort(key=lambda r: r.get("date", ""))
-                            latest_record = records[-1]
-                            if self._record_type == "rec":
-                                self._baseline = float(latest_record.get("rec_dev_record", 0))
-                            elif self._record_type == "ret":
-                                self._baseline = float(latest_record.get("ret_dev_record", 0))
-                            elif self._record_type == "act":
-                                baseline_rec = float(latest_record.get("rec_dev_record", 0))
-                                baseline_ret = float(latest_record.get("ret_dev_record", 0))
-                                self._baseline = baseline_rec - baseline_ret
-                            _LOGGER.debug("%s (일간) 센서 기준값 업데이트: %s", self._name, self._baseline)
+                    with open(self._file, "r", encoding="utf-8") as f:
+                        records = json.load(f)
+                    if records and isinstance(records, list):
+                        records.sort(key=lambda r: r.get("date", ""))
+                        latest_record = records[-1]
+                        if self._record_type == "rec":
+                            self._baseline = float(latest_record.get("rec_dev_record", 0))
+                        elif self._record_type == "ret":
+                            self._baseline = float(latest_record.get("ret_dev_record", 0))
+                        elif self._record_type == "act":
+                            baseline_rec = float(latest_record.get("rec_dev_record", 0))
+                            baseline_ret = float(latest_record.get("ret_dev_record", 0))
+                            self._baseline = baseline_rec - baseline_ret
+                        _LOGGER.debug("%s (일간) 센서 기준값 업데이트: %s", self._name, self._baseline)
                 except Exception as e:
                     _LOGGER.error("파일 읽기 오류 (%s): %s", self._file, e)
 
