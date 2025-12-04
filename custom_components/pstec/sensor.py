@@ -196,11 +196,11 @@ class PstecTcpSensor:
             ("rec_dev_record", "kWh", "total_increasing", "energy"),
             ("ret_dev_record", "kWh", "total_increasing", "energy"),
             ("act_dev_record", "kWh", "total_increasing", "energy"),
-            ("dev_voltage", "V", None, "voltage"),
-            ("dev_current", "A", None, "current"),
-            ("act_dev_power", "W", None, "power"),
-            ("dev_frequency", "Hz", None, "frequency"),
-            ("dev_factor", "PF", None, "power_factor"),
+            ("dev_voltage", "V", "measurement", "voltage"),
+            ("dev_current", "A", "measurement", "current"),
+            ("act_dev_power", "W", "measurement", "power"),
+            ("dev_frequency", "Hz", "measurement", "frequency"),
+            ("dev_factor", "PF", "measurement", "power_factor"),
             ("dev_direction", None, None, None),
         ]
         self._sensors = [
@@ -645,3 +645,4 @@ class PstecUsageSensor(SensorEntity):
                 self._state = None
                 
         self.async_write_ha_state()
+
