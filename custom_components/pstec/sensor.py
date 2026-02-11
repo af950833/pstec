@@ -14,6 +14,17 @@ from watchdog.events import FileSystemEventHandler
 
 _LOGGER = logging.getLogger(__name__)
 
+def _sync_read_json(path: str):
+    """Read JSON from file (sync). Run this in executor from async context."""
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _sync_write_json(path: str, data, *, indent: int = 4):
+    """Write JSON to file (sync). Run this in executor from async context."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=indent, ensure_ascii=False)
+
+
 
 class JSONFileEventHandler(FileSystemEventHandler):
     def __init__(self, usage_sensors, hass):
@@ -67,7 +78,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     # 센서 시작 시, 각 사용량 센서가 파일에서 기준값을 업데이트하도록 호출
     for usage_sensor in usage_sensors:
-        usage_sensor.update_from_file()  # 파일을 읽어 기준값(baseline) 업데이트 (필요한 경우)
+        await hass.async_add_executor_job(usage_sensor.update_from_file)  # 파일 I/O는 executor로
         await usage_sensor.async_update() # live 값과 비교하여 상태 산출
         
     # 기본 센서 초기 업데이트 (실패하더라도 진행)
@@ -106,8 +117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         records = []
         if os.path.exists(tday_file):
             try:
-                with open(tday_file, "r", encoding="utf-8") as f:
-                    records = json.load(f)
+                records = await hass.async_add_executor_job(_sync_read_json, tday_file)
                 if not isinstance(records, list):
                     _LOGGER.debug("파일 내용이 리스트 형식이 아님. 초기화합니다.")
                     records = []
@@ -142,8 +152,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         
         # 파일에 기록 저장
         try:
-            with open(tday_file, "w", encoding="utf-8") as f:
-                json.dump(records, f, indent=4)
+            await hass.async_add_executor_job(_sync_write_json, tday_file, records, indent=4)
             _LOGGER.debug("일간 JSON 파일 저장 완료: %s", tday_file)
         except Exception as e:
             _LOGGER.error("일간 JSON 파일 저장 오류: %s", e)
@@ -445,8 +454,7 @@ class PstecUsageSensor(SensorEntity):
         if self._usage_type == "lday":
             file_path = self._file
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    records = json.load(f)
+                records = await self.hass.async_add_executor_job(_sync_read_json, file_path)
                 if records and isinstance(records, list):
                     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
                     yesterday_str = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
@@ -477,8 +485,7 @@ class PstecUsageSensor(SensorEntity):
         elif self._usage_type == "lmon":
             if os.path.exists(self._file):
                 try:
-                    with open(self._file, "r", encoding="utf-8") as f:
-                        records = json.load(f)
+                    records = await self.hass.async_add_executor_job(_sync_read_json, self._file)
                     if records and isinstance(records, list):
                         filtered = []
                         for rec in records:
@@ -512,8 +519,7 @@ class PstecUsageSensor(SensorEntity):
         elif self._usage_type == "lmon_record":
             if os.path.exists(self._file):
                 try:
-                    with open(self._file, "r", encoding="utf-8") as f:
-                        records = json.load(f)
+                    records = await self.hass.async_add_executor_job(_sync_read_json, self._file)
                     if records and isinstance(records, list):
                         filtered = []
                         for rec in records:
@@ -645,4 +651,3 @@ class PstecUsageSensor(SensorEntity):
                 self._state = None
                 
         self.async_write_ha_state()
-
