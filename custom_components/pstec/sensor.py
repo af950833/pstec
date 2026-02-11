@@ -19,11 +19,13 @@ def _sync_read_json(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def _sync_write_json(path: str, data, *, indent: int = 4):
-    """Write JSON to file (sync). Run this in executor from async context."""
-    with open(path, "w", encoding="utf-8") as f:
+def _sync_write_json_atomic(path: str, data, *, indent: int = 4):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=indent, ensure_ascii=False)
-
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 class JSONFileEventHandler(FileSystemEventHandler):
@@ -152,12 +154,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         
         # 파일에 기록 저장
         try:
-            await hass.async_add_executor_job(_sync_write_json, tday_file, records, indent=4)
+            await hass.async_add_executor_job(lambda: _sync_write_json_atomic(tday_file, records, indent=4))
             _LOGGER.debug("일간 JSON 파일 저장 완료: %s", tday_file)
         except Exception as e:
             _LOGGER.error("일간 JSON 파일 저장 오류: %s", e)
     
-    async_track_time_change(hass, file_saving_callback, hour=0, minute=0, second=0)
+    async_track_time_change(hass, file_saving_callback, hour=0, minute=00, second=0)
     
     # 컴포넌트 시작 시, 파일이 없으면 초기 저장을 시도 (scan_interval + 5초 지연)
     async def delayed_file_save():
