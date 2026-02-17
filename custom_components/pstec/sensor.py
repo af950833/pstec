@@ -33,15 +33,34 @@ class JSONFileEventHandler(FileSystemEventHandler):
         self.usage_sensors = usage_sensors
         self.hass = hass
 
-    def on_modified(self, event):
-        file_path = os.path.abspath(event.src_path)
-        _LOGGER.debug("on_modified triggered for file: %s", file_path)
+    def _handle(self, file_path: str):
+        file_path = os.path.abspath(file_path)
+
+        # atomic write에서 생성되는 tmp 파일은 무시
+        if file_path.endswith(".tmp"):
+            return
+
+        _LOGGER.debug("watchdog event for file: %s", file_path)
         for sensor in self.usage_sensors:
             sensor_file = os.path.abspath(sensor._file)
             if file_path == sensor_file:
                 _LOGGER.debug("파일 변경 감지 (watchdog): %s", sensor_file)
                 sensor.update_from_file()
-                self.hass.loop.call_soon_threadsafe(asyncio.create_task, sensor.async_update())
+
+                # watchdog 스레드에서 코루틴을 만들지 말고, 루프 스레드에서 생성/스케줄링
+                self.hass.loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(sensor.async_update())
+                )
+
+    def on_modified(self, event):
+        self._handle(event.src_path)
+
+    def on_created(self, event):
+        self._handle(event.src_path)
+
+    def on_moved(self, event):
+        # os.replace(tmp, path) 는 moved 로 잡힐 수 있음
+        self._handle(getattr(event, "dest_path", event.src_path))
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     # 기본 PSTEC TCP 센서 엔터티 생성
@@ -156,6 +175,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         try:
             await hass.async_add_executor_job(lambda: _sync_write_json_atomic(tday_file, records, indent=4))
             _LOGGER.debug("일간 JSON 파일 저장 완료: %s", tday_file)
+            # 파일 저장 직후, 파일에서 최신 값을 다시 읽어 기준값(baseline)을 즉시 갱신
+            # (watchdog 이벤트 누락 시에도 '오늘/이번달 사용량'이 정상 갱신되도록 보강)
+            for us in usage_sensors:
+                await hass.async_add_executor_job(us.update_from_file)
+                await us.async_update()
+
         except Exception as e:
             _LOGGER.error("일간 JSON 파일 저장 오류: %s", e)
     
