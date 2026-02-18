@@ -265,23 +265,23 @@ class PstecTcpSensor:
                 break
             except (asyncio.TimeoutError, ConnectionResetError) as e:
                 if attempt == max_retries - 1:
-                    _LOGGER.error("최대 재시도 횟수 도달. 업데이트 중단")
+                    _LOGGER.error("[%s] 최대 재시도 횟수 도달. 업데이트 중단", self._name)
                     return
-                _LOGGER.warning(f"연결 실패 ({attempt+1}회 재시도)...")
+                _LOGGER.warning("[%s] 연결 실패 (%s회 재시도)...", self._name, attempt+1)
                 await asyncio.sleep(retry_delay)
             except Exception as e:
-                _LOGGER.error(f"통신 오류: {str(e)}")
+                _LOGGER.error("[%s] 통신 오류: %s", self._name, e)
                 return
 
         if len(data) < 5 or data[-1] != 0x03:
-            _LOGGER.error(f"잘못된 패킷: 길이={len(data)}, ETX={data[-1] if len(data)>=1 else '없음'}")
+            _LOGGER.error("[%s] 잘못된 패킷: 길이=%s, ETX=%s", self._name,len(data), data[-1] if len(data)>=1 else "없음")
             return
 
         calculated_bcc = 0
         for byte in data[:-2]:
             calculated_bcc ^= byte
         if calculated_bcc != data[-2]:
-            _LOGGER.error(f"BCC 불일치: 기대값={data[-2]}, 계산값={calculated_bcc}")
+            _LOGGER.error("[%s] BCC 불일치: 기대값=%s, 계산값=%s", self._name, data[-2], calculated_bcc)
             return
 
         raw_data = data.hex()
@@ -294,7 +294,7 @@ class PstecTcpSensor:
 
     def _process_data(self, data):
         if len(data) < 70:
-            _LOGGER.warning("Invalid Data: Received data too short - Keeping Previous Value")
+            _LOGGER.warning("[%s] Invalid Data: Received data too short - Keeping Previous Value", self._name)
             return None
 
         rec = float(int(data[4:12], 10)) / 10
@@ -417,7 +417,7 @@ class PstecUsageSensor(SensorEntity):
                                 self._baseline = baseline_rec - baseline_ret
                             _LOGGER.debug("%s (월간) 센서 기준값 업데이트: %s", self._name, self._baseline)
                 except Exception as e:
-                    _LOGGER.error("파일 읽기 오류 (%s): %s", self._file, e)
+                    _LOGGER.error("[%s] 파일 읽기 오류 (%s): %s", self._device_name, self._file, e)
         elif self._usage_type == "lmon_record":
             # act_lmon_record 센서는 파일에서 검침일과 일치하는 기록 중 최신 항목의 net 값을 baseline으로 사용
             if os.path.exists(self._file):
