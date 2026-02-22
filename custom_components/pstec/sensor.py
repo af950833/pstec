@@ -215,6 +215,8 @@ class PstecTcpSensor:
         self._em_id = bytes.fromhex(entry.data["em_id"])
         self._payload = self._build_request_packet()
         self._sensors = []
+        # 업데이트 중복 실행 방지 (HA 이벤트 루프 지연 완화)
+        self._update_lock = asyncio.Lock()
 
     def _build_request_packet(self):
         stx = 0x81
@@ -248,49 +250,100 @@ class PstecTcpSensor:
     async def async_update_interval(self, _):
         await self.async_update()
 
+    async def _read_pstec_frame(self, reader: asyncio.StreamReader) -> bytes:
+        """Read one PSTEC response frame robustly.
+
+        TCP는 스트림이므로, read(1024) 1회로는 프레임이 잘려 들어올 수 있습니다.
+        프로토콜 문서 기준으로 응답 길이는 고정입니다.
+          - 1상 응답(CMD=0x72): 35 bytes
+          - 3상 응답(CMD=0x82): 43 bytes
+        """
+
+        # 먼저 STX + CMD
+        header = await asyncio.wait_for(reader.readexactly(2), timeout=3.0)
+        if header[0] != 0x81:
+            raise ValueError(f"잘못된 STX: {header[0]:#x}")
+
+        cmd = header[1]
+        if cmd == 0x72:  # 1Phase Response(EM→PC)
+            remaining = 35 - 2
+        elif cmd == 0x82:  # 3Phase Response(EM→PC)
+            remaining = 43 - 2
+        else:
+            raise ValueError(f"알 수 없는 CMD: {cmd:#x}")
+
+        body = await asyncio.wait_for(reader.readexactly(remaining), timeout=3.0)
+        return header + body
+
     async def async_update(self):
-        max_retries = 3
-        retry_delay = 3
-        for attempt in range(max_retries):
-            try:
-                reader, writer = await asyncio.open_connection(self._host, self._port)
-                #_LOGGER.debug(f"연결 테스트: {self._host}:{self._port}")
-                writer.write(self._payload)
-                #_LOGGER.debug(f"송신 패킷 (HEX): {self._payload.hex()}")
-                await writer.drain()
-                data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
-                writer.close()
-                await writer.wait_closed()
-                #_LOGGER.debug(f"Raw Data (Hex): {data.hex()}")
-                break
-            except (asyncio.TimeoutError, ConnectionResetError) as e:
-                if attempt == max_retries - 1:
-                    _LOGGER.error("[%s] 최대 재시도 횟수 도달. 업데이트 중단", self._name)
+        """Fetch new state data for all PSTEC sensors."""
+
+        # 스캔 인터벌이 짧고 통신이 지연되면 업데이트가 겹치며 HA가 느려질 수 있습니다.
+        # 이전 업데이트가 진행 중이면 이번 주기는 스킵합니다.
+        if getattr(self, "_update_lock", None) is not None and self._update_lock.locked():
+            _LOGGER.debug("[%s] 이전 업데이트가 아직 진행 중입니다. 이번 업데이트는 스킵합니다.", self._name)
+            return
+
+        async with self._update_lock:
+            # 사용자 요청값: timeout=3s, retry=1, wait=1000ms
+            max_retries = 1
+            retry_delay = 1.0
+
+            for attempt in range(max_retries + 1):
+                try:
+                    # 연결 단계도 타임아웃으로 묶어 총 지연을 예측 가능하게 함
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(self._host, self._port),
+                        timeout=3.0,
+                    )
+
+                    try:
+                        #_LOGGER.debug(f"연결 테스트: {self._host}:{self._port}")
+                        writer.write(self._payload)
+                        #_LOGGER.debug(f"송신 패킷 (HEX): {self._payload.hex()}")
+                        await writer.drain()
+
+                        # ⭐ 고정 길이 프레임 읽기 (TCP fragmentation 방지)
+                        data = await self._read_pstec_frame(reader)
+
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+
+                    #_LOGGER.debug(f"Raw Data (Hex): {data.hex()}")
+
+                    # ---- 응답 검증 ----
+                    if len(data) < 5 or data[-1] != 0x03:
+                        _LOGGER.error("[%s] 잘못된 패킷: 길이=%s, ETX=%s", self._name, len(data), data[-1] if len(data) >= 1 else "없음")
+                        raise ValueError("Invalid ETX")
+
+                    calculated_bcc = 0
+                    for byte in data[:-2]:
+                        calculated_bcc ^= byte
+                    if calculated_bcc != data[-2]:
+                        _LOGGER.error("[%s] BCC 불일치: 기대값=%s, 계산값=%s", self._name, data[-2], calculated_bcc)
+                        raise ValueError("BCC mismatch")
+
+                    # ---- 상태 반영 ----
+                    raw_data = data.hex()
+                    new_state = self._process_data(raw_data)
+                    if new_state:
+                        for sensor in self._sensors:
+                            key = f"{self._name}_{sensor.sensor_type}"
+                            if key in new_state:
+                                sensor.set_state(new_state[key])
+
+                    return  # 성공 시 종료
+
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionResetError, OSError, ValueError) as e:
+                    if attempt >= max_retries:
+                        _LOGGER.error("[%s] 최대 재시도 횟수 도달. 업데이트 중단 (%s)", self._name, e)
+                        return
+                    _LOGGER.warning("[%s] 통신 실패 (%s회 재시도)... (%s)", self._name, attempt + 1, e)
+                    await asyncio.sleep(retry_delay)
+                except Exception as e:
+                    _LOGGER.error("[%s] 통신 오류: %s", self._name, e)
                     return
-                _LOGGER.warning("[%s] 연결 실패 (%s회 재시도)...", self._name, attempt+1)
-                await asyncio.sleep(retry_delay)
-            except Exception as e:
-                _LOGGER.error("[%s] 통신 오류: %s", self._name, e)
-                return
-
-        if len(data) < 5 or data[-1] != 0x03:
-            _LOGGER.error("[%s] 잘못된 패킷: 길이=%s, ETX=%s", self._name,len(data), data[-1] if len(data)>=1 else "없음")
-            return
-
-        calculated_bcc = 0
-        for byte in data[:-2]:
-            calculated_bcc ^= byte
-        if calculated_bcc != data[-2]:
-            _LOGGER.error("[%s] BCC 불일치: 기대값=%s, 계산값=%s", self._name, data[-2], calculated_bcc)
-            return
-
-        raw_data = data.hex()
-        new_state = self._process_data(raw_data)
-        if new_state:
-            for sensor in self._sensors:
-                key = f"{self._name}_{sensor.sensor_type}"
-                if key in new_state:
-                    sensor.set_state(new_state[key])
 
     def _process_data(self, data):
         if len(data) < 70:
