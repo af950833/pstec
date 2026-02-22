@@ -1,12 +1,10 @@
 {
   "domain": "pstec",
   "name": "PSTEC 전력량계",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "config_flow": true,
   "documentation": "https://github.com/af950833/pstec",
   "requirements": [],
   "codeowners": ["@af950833"],
   "iot_class": "local_polling"
 }
-
-
